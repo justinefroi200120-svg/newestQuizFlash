@@ -11,11 +11,11 @@
 const $=id=>document.getElementById(id);
 const socket=io({reconnection:true});
 let token=sessionStorage.getItem('teacherToken');
-let teacher=false,joined=false,roomCode='',activeTeacherRoom='',selectedQuiz='',quizzes=[],rooms=[],snapshots=new Map(),answered=false,questionIndex=-1,lastQuestionSignature='';
+let teacher=false,joined=false,roomCode='',activeTeacherRoom='',selectedQuiz='',quizzes=[],rooms=[],snapshots=new Map(),answered=false,selectedAnswer=null,questionIndex=-1,lastQuestionSignature='';
 const sample=[{text:'What is the capital of the Philippines?',choices:['Cebu','Davao','Manila','Baguio'],correct:2,timeLimit:15},{text:'What is 5 × 6?',choices:['11','30','25','60'],correct:1,timeLimit:10}];
 function notice(msg){$('notice').textContent=msg;}
 function setConnection(online){$('connection').textContent=online?'● Connected':'● Disconnected — quiz locked; re-enter room code';$('connection').className='status '+(online?'good':'bad');}
-function clearStudent(){joined=false;roomCode='';answered=false;questionIndex=-1;lastQuestionSignature='';$('quizPanel').hidden=!teacher;$('studentPanel').hidden=false;$('studentStatus').textContent='';$('joinCode').disabled=false;$('studentName').disabled=false;$('choices').replaceChildren();$('result').textContent='';}
+function clearStudent(){joined=false;roomCode='';answered=false;selectedAnswer=null;questionIndex=-1;lastQuestionSignature='';$('quizPanel').hidden=!teacher;$('studentPanel').hidden=false;$('studentStatus').textContent='';$('joinCode').disabled=false;$('studentName').disabled=false;$('choices').replaceChildren();$('result').textContent='';}
 function switchTeacher(active){teacher=active;$('loginPanel').hidden=active;$('teacherPanel').hidden=!active;$('quizPanel').hidden=!active&&!joined;if(active)$('studentPanel').hidden=true;else $('studentPanel').hidden=false;}
 function emitLogin(event){socket.emit('teacher:'+event,{username:$('username').value.trim(),password:$('password').value});}
 $('register').onclick=()=>emitLogin('register');$('login').onclick=()=>emitLogin('login');
@@ -33,7 +33,7 @@ function updateDashboard(data){quizzes=data.quizzes;rooms=data.rooms;const selec
 function renderRooms(){const root=$('rooms');root.replaceChildren();if(!rooms.length)root.append(el('p','No live rooms yet.','muted'));for(const r of rooms){const wrap=el('article',undefined,'room');wrap.append(el('h3',`${r.title} — ${r.code}`),el('p',`${r.participants} enrolled • ${r.finished?'Finished':r.started?'In progress':'Waiting'}`,'muted'));const actions=el('div',undefined,'row');actions.append(button('View',()=>{activeTeacherRoom=r.code;renderRooms();renderTeacherRoom();}),button('Start',()=>command(r.code,'start')),button('Pause / Resume',()=>command(r.code,'pause'),'secondary'),button('Reveal',()=>command(r.code,'reveal'),'secondary'),button('Next',()=>command(r.code,'next')),button('Reset',()=>command(r.code,'reset'),'secondary'),button('Download PDF',()=>command(r.code,'pdf'),'secondary'),button('Close Room',()=>{if(confirm('Close room '+r.code+'?'))socket.emit('teacher:close-room',r.code);},'danger'));wrap.append(actions);if(r.code===activeTeacherRoom)wrap.classList.add('active');root.append(wrap);}}
 function command(code,action){socket.emit('teacher:command',{code,action});}
 function renderTeacherRoom(){const s=snapshots.get(activeTeacherRoom);$('quizPanel').hidden=!s;if(s)render(s,true);}
-function renderLeaderboard(items){const root=$('leaderboard');root.replaceChildren();if(!items.length){root.append(el('p','No students yet.','muted'));return;}items.forEach((p,i)=>root.append(el('div',`#${i+1} ${p.name} — ${p.score} point${p.score===1?'':'s'}${p.connected?'':' (offline)'}`,'rank'+(!p.connected?' offline':''))));}
+function renderLeaderboard(items){const root=$('leaderboard');root.replaceChildren();if(!items.length){root.append(el('p','No students yet.','muted'));return;}items.forEach((p,i)=>root.append(el('div',`#${i+1} ${p.name} — ${p.score} point${p.score===1?'':'s'}${p.connected?' 🟢 Online':' 🔴 Offline'}`,'rank'+(!p.connected?' offline':''))));}
 function render(s,isTeacher){if(isTeacher&&s.code!==activeTeacherRoom)return;if(!isTeacher&&(!joined||s.code!==roomCode))return;
  $('quizPanel').hidden=false;$('quizTitleLive').textContent=s.title+' — '+s.code;
  $('participants').textContent=`${s.participantCount} participants`;$('counter').textContent=`${s.connectedCount} connected • ${s.participantCount-s.connectedCount} disconnected`;
@@ -41,14 +41,19 @@ function render(s,isTeacher){if(isTeacher&&s.code!==activeTeacherRoom)return;if(
  renderLeaderboard(s.leaderboard);
  if(!s.question){$('questionTitle').textContent=s.finished?'Quiz complete!':'Waiting for teacher…';$('choices').replaceChildren();return;}
  $('questionTitle').textContent=`Question ${s.currentQuestion+1} of ${s.totalQuestions}: ${s.question.text}`;
- if(questionIndex!==s.currentQuestion || lastQuestionSignature!==s.code){questionIndex=s.currentQuestion;lastQuestionSignature=s.code;answered=false;$('result').textContent='';}
+ if(questionIndex!==s.currentQuestion || lastQuestionSignature!==s.code){questionIndex=s.currentQuestion;lastQuestionSignature=s.code;answered=false;selectedAnswer=null;$('result').textContent='';}
  const root=$('choices');root.replaceChildren();
  s.question.choices.forEach((choice,i)=>{const label=choice+(s.reveal&&!isTeacher&&s.correctAnswer===i?' ✅':'');const b=button(label,()=>{
    if(!socket.connected||!joined||answered||s.reveal||s.paused||s.transitioning||s.finished||s.timeLeft<=0)return;
-   answered=true;socket.emit('answer',i);$('result').textContent='Submitting answer…';root.querySelectorAll('button').forEach(b=>b.disabled=true);
+   answered=true;selectedAnswer=i;socket.emit('answer',i);$('result').textContent='Submitting answer…';root.querySelectorAll('button').forEach(b=>b.disabled=true);
  },'choice');b.disabled=isTeacher||!socket.connected||!joined||answered||s.reveal||s.paused||s.transitioning||s.finished||s.timeLeft<=0;root.append(b);});
- if(s.finished)$('result').textContent='Quiz complete.';
- else if(s.reveal)$('result').textContent=isTeacher?'Answers are hidden on the teacher screen.':'Time is up.';
+ if(s.reveal){
+   if(isTeacher)$('result').textContent='Answers are hidden on the teacher screen.';
+   else if(!answered || selectedAnswer===null)$('result').textContent='Time is up — no answer submitted.';
+   else if(selectedAnswer===s.correctAnswer)$('result').textContent='✅ Correct answer! +1 point.';
+   else $('result').textContent=`❌ Wrong answer. Correct answer: ${s.question.choices[s.correctAnswer]}.`;
+ }
+ else if(s.finished)$('result').textContent='Quiz complete.';
 }
 function lockOnDisconnect(){setConnection(false);clearStudent();$('joinCode').value='';notice('Internet connection lost. To view or answer the quiz again, reconnect and re-enter the room code.');}
 socket.on('connect',()=>{setConnection(true);if(token)socket.emit('teacher:resume',token);});
@@ -63,9 +68,10 @@ socket.on('teacher:room-created',data=>{activeTeacherRoom=data.code;renderRooms(
 socket.on('teacher:room-closed',code=>{snapshots.delete(code);if(activeTeacherRoom===code){activeTeacherRoom='';$('quizPanel').hidden=true;}notice('Room '+code+' closed.');});
 socket.on('joined',data=>{joined=true;roomCode=data.code;questionIndex=-1;answered=false;$('studentPanel').hidden=true;$('studentStatus').textContent='Joined as '+data.name;notice('Joined room '+data.code);});
 socket.on('session-closed',()=>{clearStudent();notice('Teacher closed the room.');});
-socket.on('update',s=>{if(teacher){snapshots.set(s.code,s);if(!activeTeacherRoom)activeTeacherRoom=s.code;renderTeacherRoom();}else render(s,false);});
-socket.on('answer-status',data=>{if(!joined||data.question!==questionIndex)return;if(data.answered){answered=true;document.querySelectorAll('.choice').forEach(b=>b.disabled=true);}});
-socket.on('answer:accepted',()=>{$('result').textContent='Answer received by server.';});
+let lastStudentSnapshot=null;
+socket.on('update',s=>{if(!teacher && joined && s.code===roomCode)lastStudentSnapshot=s;if(teacher){snapshots.set(s.code,s);if(!activeTeacherRoom)activeTeacherRoom=s.code;renderTeacherRoom();}else render(s,false);});
+socket.on('answer-status',data=>{if(!joined||data.question!==questionIndex)return;if(data.answered){answered=true;selectedAnswer=data.selectedIndex;document.querySelectorAll('.choice').forEach(b=>b.disabled=true);if(lastStudentSnapshot?.reveal)render(lastStudentSnapshot,false);}});
+socket.on('answer:accepted',()=>{if(!lastStudentSnapshot?.reveal)$('result').textContent='Answer received. Result shown when the question ends.';});
 socket.on('error-message',notice);
 socket.on('teacher:pdf-ready',bytes=>{const url=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));const a=document.createElement('a');a.href=url;a.download='Quiz_Results_'+Date.now()+'.pdf';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
 setConnection(socket.connected);

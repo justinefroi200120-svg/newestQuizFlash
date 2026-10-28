@@ -89,7 +89,7 @@ function publish(room) {
   for (const id of room.teacherSocketIds) io.to(id).emit('update',view(room,true));
   for (const p of room.players.values()) if (p.connected && p.socketId) {
     io.to(p.socketId).emit('update',view(room,false));
-    io.to(p.socketId).emit('answer-status',{question:room.currentQuestion,answered:p.answeredQuestion===room.currentQuestion});
+    io.to(p.socketId).emit('answer-status',{question:room.currentQuestion,answered:p.answeredQuestion===room.currentQuestion,selectedIndex:p.answeredQuestion===room.currentQuestion?p.selectedAnswer:null});
   }
 }
 function stopTimers(room) { clearInterval(room.interval); clearTimeout(room.transitionTimeout); room.interval=null; room.transitionTimeout=null; }
@@ -234,7 +234,7 @@ io.on('connection',socket=>{
           if(!room.paused){room.timeLeft=Math.max(0,Math.ceil((room.deadline-Date.now())/1000));room.paused=true;}
           else{room.paused=false;room.deadline=Date.now()+room.timeLeft*1000;}publish(room);break;
         case 'reset': stopTimers(room);room.currentQuestion=-1;room.started=false;room.finished=false;room.reveal=false;room.transitioning=false;room.paused=false;room.timeLeft=0;
-          for(const p of room.players.values()){p.score=0;p.answeredQuestion=-1;}publish(room);break;
+          for(const p of room.players.values()){p.score=0;p.answeredQuestion=-1;p.selectedAnswer=null;}publish(room);break;
         case 'pdf':makePdf(room,socket);break;
         default:throw Error('Unknown command.');
       }
@@ -252,7 +252,7 @@ io.on('connection',socket=>{
       const key=name.toLowerCase();
       let player=room.players.get(key);
       if(player?.connected)throw Error('This name is already connected. Use a different name.');
-      if(!player){player={id:key,name,score:0,answeredQuestion:-1,connected:false,socketId:null};room.players.set(key,player);}
+      if(!player){player={id:key,name,score:0,answeredQuestion:-1,selectedAnswer:null,connected:false,socketId:null};room.players.set(key,player);}
       player.connected=true;player.socketId=socket.id;
       playerSockets.set(socket.id,{code,playerId:key});socket.join(`room:${code}`);
       socket.emit('joined',{code,name});publish(room);
@@ -266,6 +266,7 @@ io.on('connection',socket=>{
     const question=room.questions[room.currentQuestion];
     if(!Number.isInteger(index)||index<0||index>=question.choices.length)return;
     player.answeredQuestion=room.currentQuestion;
+    player.selectedAnswer=index;
     if(index===question.correct)player.score++;
     socket.emit('answer:accepted',{question:room.currentQuestion});publish(room);
   });
