@@ -13,6 +13,7 @@ const io = new Server(server, { maxHttpBufferSize: 1000000, pingInterval: 10000,
 const PORT = process.env.PORT || 3000;
 if (!process.env.DATABASE_URL) { console.error('DATABASE_URL is required (Render PostgreSQL connection string).'); process.exit(1); }
 const db = new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_SSL === 'true' ? {rejectUnauthorized:false} : undefined});
+app.get('/teacher',(_req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.use(express.static(path.join(__dirname,'public')));
 async function initDb(){
   await db.query(`CREATE TABLE IF NOT EXISTS users (
@@ -182,6 +183,10 @@ async function sendHistory(socket) {
 io.on('connection',socket=>{
   socket.on('teacher:register',async data=>{
     try {
+      const registrationKey=process.env.TEACHER_REGISTRATION_KEY;
+      if(!registrationKey || registrationKey.length<16) throw Error('Teacher registration is disabled. Ask the administrator to configure TEACHER_REGISTRATION_KEY.');
+      const supplied=String(data?.registrationKey||'');
+      if(Buffer.byteLength(supplied)!==Buffer.byteLength(registrationKey)||!timingSafeEqual(Buffer.from(supplied),Buffer.from(registrationKey))) throw Error('Invalid teacher registration key.');
       const username=String(data?.username||'').trim().toLowerCase();
       const password=String(data?.password||'');
       if(!/^[a-z0-9_.-]{3,40}$/.test(username)||password.length<8||password.length>128) throw Error('Username: 3–40 letters/numbers/._-; password: 8–128 characters.');

@@ -6,6 +6,8 @@ services:
     buildCommand: npm install
     startCommand: npm start
     envVars:
+      - key: TEACHER_REGISTRATION_KEY
+        generateValue: true
       - key: DATABASE_URL
         fromDatabase:
           name: quiz-flash-db

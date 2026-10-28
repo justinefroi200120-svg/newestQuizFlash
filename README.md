@@ -8,7 +8,7 @@ Teacher and student accounts, saved quizzes, and submitted answer history now us
 2. Create a Node web service pointing at this repository. Build command: `npm install`. Start command: `npm start`.
 3. Set `DATABASE_URL` to your database's **internal PostgreSQL URL** using the environment-variable settings. **Never commit the connection string**.
 4. If your provider requires TLS for the supplied URL, set `DATABASE_SSL=true`. Render internal database connections commonly do not require TLS.
-5. Deploy. On startup, tables and the index are created automatically. Open your deployed site, register a teacher, create and save a quiz, then create a room. Students must register/login before joining.
+5. Deploy. On startup, tables and the index are created automatically. Open `/teacher` to register and log in as a teacher, then save a quiz and create a room. Student accounts and joining remain on `/`. Students must register/login before joining.
 
 ## Local development
 
@@ -28,3 +28,11 @@ Install Node.js 20+, run `npm install`, then set `DATABASE_URL` to a PostgreSQL 
 ## Smoke testing
 
 Test with Teacher A, Teacher B, Student A and Student B using separate browsers/devices; verify room isolation, teacher login, saving quizzes, student history persistence after server restart, correct/wrong feedback after reveal, offline labels, re-entry after reconnection, and participant removal.
+
+## v3.1: Teacher-only entry and student review tab
+
+- Students visit `/`; the teacher login and registration form are not shown on this page. Teachers visit `/teacher` directly (for example, `https://your-app.onrender.com/teacher`). **The URL is not an authorization boundary**. The backend enforces a required registration key for all teacher account creation requests.
+- In the Render web service environment settings, set `TEACHER_REGISTRATION_KEY` to a long random secret **at least 16 characters**. Never publish this key in the app or commit it to Git. Only teachers approved by your administrator should receive it. If unset, teacher account creation is disabled; existing teachers can still log in.
+- Teacher registration form starts collapsed on `/teacher`; expand **Create a teacher account** to enter the teacher signup key.
+- Answer history is **closed by default** after student login. Click **Show My Answer History** to open the review and **Hide My Answer History** to collapse it. Refresh is inside the review. Historical answers continue to respect the question-reveal rule on the backend.
+- This is UI separation plus a server-side signup gate; consider invite-based provisioning and rate limiting before large public deployment.

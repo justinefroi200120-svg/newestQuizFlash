@@ -2,15 +2,19 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quiz Flash</title><link rel="stylesheet" href="styles.css"><script src="/socket.io/socket.io.js"></script></head>
 <body><main class="container">
 <header class="card"><h1>⚡ Quiz Flash</h1><p class="muted">Multiple teachers. Independent live quiz rooms. Real-time leaderboards.</p><div id="connection" class="status">Connecting…</div></header>
-<section class="card" id="loginPanel"><h2>Teacher Accounts</h2><input id="username" placeholder="Username" autocomplete="username"><input id="password" type="password" placeholder="Password (8+ characters)" autocomplete="current-password"><button id="login">Log In</button><button id="register" class="secondary">Create Teacher Account</button><p class="muted">Teachers have private quiz libraries stored in PostgreSQL.</p></section>
+<section class="card" id="loginPanel" hidden><h2>Teacher Login</h2><input id="username" placeholder="Username" autocomplete="username"><input id="password" type="password" placeholder="Password (8+ characters)" autocomplete="current-password"><button id="login">Log In</button><p class="muted">Teacher accounts and quizzes are stored privately in PostgreSQL.</p><details id="teacherSignUp"><summary>Create a teacher account (administrator approval required)</summary><p class="muted">Enter the teacher registration key supplied by the school administrator. This key is not your login password.</p><input id="teacherRegistrationKey" type="password" placeholder="Teacher registration key" autocomplete="off"><button id="register" class="secondary">Create Teacher Account</button></details></section>
 <section class="card" id="teacherPanel" hidden><div class="row"><h2>Teacher Dashboard</h2><button id="logout" class="secondary">Log Out</button></div><h3>Saved quizzes</h3><select id="savedQuizzes"><option value="">New quiz</option></select><input id="quizTitle" placeholder="Quiz title"><textarea id="questionsInput" rows="11" spellcheck="false" aria-label="Questions JSON"></textarea><div class="row"><button id="saveQuiz">Save Quiz</button><button id="newQuiz" class="secondary">New Quiz</button><button id="deleteQuiz" class="danger">Delete Saved Quiz</button><button id="createRoom">Create Live Room</button></div><p class="muted">Each room gets its own 6-character join code. Saved quizzes stay available after server restarts.</p><h3>My live rooms</h3><div id="rooms"></div></section>
 <section class="card" id="studentAuth"><h2>Student Account</h2><p class="muted">Create or log in to your personal account to save and review your answers.</p><input id="studentUsername" placeholder="Student username" autocomplete="username"><input id="studentPassword" type="password" placeholder="Student password (8+ characters)" autocomplete="current-password"><div class="row"><button id="studentLogin">Log In</button><button id="studentRegister" class="secondary">Create Student Account</button><button id="studentLogout" class="secondary" hidden>Log Out</button></div><p id="studentAccountStatus" class="muted">Not signed in.</p></section>
-<section class="card" id="studentHistory" hidden><div class="row"><h2>My Answer History</h2><button id="refreshHistory" class="secondary">Refresh</button></div><p class="muted">Review completed questions, including your selected answer and the correct answer. Results are hidden until the question ends.</p><div id="historyItems"></div></section>
+<section class="card" id="historyControl" hidden><button id="toggleHistory" class="secondary" type="button" aria-controls="studentHistory" aria-expanded="false">Show My Answer History</button><section id="studentHistory" hidden><div class="row"><h2>My Answer History</h2><button id="refreshHistory" class="secondary">Refresh</button></div><p class="muted">Review completed questions, including your selected answer and the correct answer. Results are hidden until the question ends.</p><div id="historyItems"></div></section></section>
 <section class="card" id="studentPanel"><h2>Join a Quiz</h2><input id="joinCode" placeholder="6-character room code" maxlength="6" autocapitalize="characters"><input id="studentName" placeholder="Your name" maxlength="30"><button id="join">Join Quiz</button><div id="studentStatus" class="muted"></div></section>
 <section class="card" id="quizPanel" hidden><div class="row"><h2 id="quizTitleLive">Quiz</h2><span id="participants" class="pill"></span></div><p id="counter" class="muted"></p><h3 id="questionTitle">Waiting for teacher…</h3><div id="timer" class="timer">--</div><div id="choices"></div><p id="result" aria-live="polite"></p><h3>Live leaderboard</h3><div id="leaderboard"></div></section>
 <div class="card muted" id="notice" role="status" aria-live="polite">Ready.</div>
 </main><script>
 const $=id=>document.getElementById(id);
+const teacherRoute=window.location.pathname.replace(/\/$/,'')==='/teacher';
+$('loginPanel').hidden=!teacherRoute;
+$('studentAuth').hidden=teacherRoute;
+$('studentPanel').hidden=teacherRoute;
 const socket=io({reconnection:true});
 let token=sessionStorage.getItem('teacherToken');
 let studentToken=sessionStorage.getItem('studentToken'),studentLoggedIn=false;
@@ -19,13 +23,15 @@ const sample=[{text:'What is the capital of the Philippines?',choices:['Cebu','D
 function notice(msg){$('notice').textContent=msg;}
 function setConnection(online){$('connection').textContent=online?'● Connected':'● Disconnected — quiz locked; re-enter room code';$('connection').className='status '+(online?'good':'bad');}
 function clearStudent(){joined=false;roomCode='';answered=false;selectedAnswer=null;questionIndex=-1;lastQuestionSignature='';$('quizPanel').hidden=!teacher;$('studentPanel').hidden=false;$('studentStatus').textContent='';$('joinCode').disabled=false;$('studentName').disabled=false;$('choices').replaceChildren();$('result').textContent='';}
-function switchTeacher(active){teacher=active;$('loginPanel').hidden=active;$('teacherPanel').hidden=!active;$('quizPanel').hidden=!active&&!joined;if(active)$('studentPanel').hidden=true;else $('studentPanel').hidden=false;}
-function emitLogin(event){socket.emit('teacher:'+event,{username:$('username').value.trim(),password:$('password').value});}
+function switchTeacher(active){teacher=active;$('loginPanel').hidden=active||!teacherRoute;$('teacherPanel').hidden=!active;$('quizPanel').hidden=!active&&!joined;$('studentPanel').hidden=active||teacherRoute;}
+function emitLogin(event){if(!teacherRoute)return;socket.emit('teacher:'+event,{username:$('username').value.trim(),password:$('password').value,...(event==='register'?{registrationKey:$('teacherRegistrationKey').value}:{})});}
 $('register').onclick=()=>emitLogin('register');$('login').onclick=()=>emitLogin('login');
 $('logout').onclick=()=>{socket.emit('teacher:logout',token);sessionStorage.removeItem('teacherToken');token=null;activeTeacherRoom='';snapshots.clear();switchTeacher(false);clearStudent();};
 $('studentRegister').onclick=()=>socket.emit('student:register',{username:$('studentUsername').value,password:$('studentPassword').value});
 $('studentLogin').onclick=()=>socket.emit('student:login',{username:$('studentUsername').value,password:$('studentPassword').value});
-$('studentLogout').onclick=()=>{socket.emit('student:logout',studentToken);sessionStorage.removeItem('studentToken');studentToken=null;studentLoggedIn=false;clearStudent();$('studentHistory').hidden=true;$('studentLogout').hidden=true;$('studentAccountStatus').textContent='Not signed in.';};
+$('studentLogout').onclick=()=>{socket.emit('student:logout',studentToken);sessionStorage.removeItem('studentToken');studentToken=null;studentLoggedIn=false;clearStudent();closeHistory();$('historyControl').hidden=true;$('studentLogout').hidden=true;$('studentAccountStatus').textContent='Not signed in.';};
+function closeHistory(){$('studentHistory').hidden=true;$('toggleHistory').textContent='Show My Answer History';$('toggleHistory').setAttribute('aria-expanded','false');}
+$('toggleHistory').onclick=()=>{const show=$('studentHistory').hidden;$('studentHistory').hidden=!show;$('toggleHistory').textContent=show?'Hide My Answer History':'Show My Answer History';$('toggleHistory').setAttribute('aria-expanded',String(show));if(show&&socket.connected)socket.emit('student:history');};
 $('refreshHistory').onclick=()=>socket.emit('student:history');
 $('join').onclick=()=>{if(!studentLoggedIn){notice('Log in to your student account before joining.');return;}if(!socket.connected){notice('No connection. Connect to the internet and try again.');return;}socket.emit('join',{code:$('joinCode').value,name:$('studentName').value});};
 $('questionsInput').value=JSON.stringify(sample,null,2);
@@ -77,16 +83,16 @@ function render(s,isTeacher){if(isTeacher&&s.code!==activeTeacherRoom)return;if(
  else if(s.finished)$('result').textContent='Quiz complete.';
 }
 function lockOnDisconnect(){setConnection(false);clearStudent();$('joinCode').value='';notice('Internet connection lost. To view or answer the quiz again, reconnect and re-enter the room code.');}
-socket.on('connect',()=>{setConnection(true);if(token)socket.emit('teacher:resume',token);if(studentToken)socket.emit('student:resume',studentToken);});
+socket.on('connect',()=>{setConnection(true);if(teacherRoute&&token)socket.emit('teacher:resume',token);if(!teacherRoute&&studentToken)socket.emit('student:resume',studentToken);});
 socket.on('disconnect',lockOnDisconnect);
 window.addEventListener('offline',lockOnDisconnect);
 socket.on('student:token',t=>{studentToken=t;sessionStorage.setItem('studentToken',t);});
-socket.on('student:granted',data=>{studentLoggedIn=true;$('studentHistory').hidden=false;$('studentLogout').hidden=false;$('studentAccountStatus').textContent='Signed in'+(data.username?' as '+data.username:'')+'. Enter the room code to join.';notice('Student account ready.');});
+socket.on('student:granted',data=>{if(teacherRoute)return;studentLoggedIn=true;closeHistory();$('historyControl').hidden=false;$('studentLogout').hidden=false;$('studentAccountStatus').textContent='Signed in'+(data.username?' as '+data.username:'')+'. Enter the room code to join.';notice('Student account ready.');});
 socket.on('student:message',notice);
 socket.on('student:logged-out',()=>{studentLoggedIn=false;});
 socket.on('student:history',items=>{const root=$('historyItems');root.replaceChildren();if(!items.length){root.append(el('p','No submitted answers yet.','muted'));return;}for(const item of items){const wrap=el('article',undefined,'room');wrap.append(el('strong',item.quiz_title+' · '+item.room_code+' · Question '+(item.question_index+1)));wrap.append(el('p',item.question_text));const chosen=item.choices[item.selected_index]??'Unknown';wrap.append(el('p','Your answer: '+chosen));if(item.review_available){wrap.append(el('p','Correct answer: '+item.choices[item.correct_index]));wrap.append(el('p',item.awarded_points?'✅ Correct — +1 point':'❌ Incorrect — +0 points',item.awarded_points?'good':'bad'));}else wrap.append(el('p','Result available when this question ends.','muted'));root.append(wrap);}});
 socket.on('teacher:token',t=>{token=t;sessionStorage.setItem('teacherToken',t);});
-socket.on('teacher:granted',()=>{switchTeacher(true);notice('Teacher account signed in.');});
+socket.on('teacher:granted',()=>{if(!teacherRoute)return;switchTeacher(true);notice('Teacher account signed in.');});
 socket.on('teacher:dashboard',updateDashboard);
 socket.on('teacher:auth-message',notice);
 socket.on('teacher:logged-out',()=>notice('Logged out.'));
