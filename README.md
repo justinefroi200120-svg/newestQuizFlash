@@ -1,27 +1,30 @@
-# Quiz Flash — Multi-teacher edition
+# Quiz Flash v3 — PostgreSQL + Student Accounts
 
-Requires Node.js 18+. Run `npm install` and `npm start`, then open http://localhost:3000.
+Teacher and student accounts, saved quizzes, and submitted answer history now use **PostgreSQL** instead of a local JSON file. Each teacher has isolated quiz libraries and independent live rooms. Students log in, enter room code and display name, then answer questions and review their history. Correct answers are not disclosed until the respective question ends. Offline participants remain on the leaderboard. Teacher participant removal, server-side scoring, PDF results, and connection protection remain available.
 
-## Features
-- Teacher registration and login with salted scrypt password hashes; login tokens held in server RAM and browser sessionStorage.
-- Private saved quiz libraries persisted in `data/store.json` (back it up!).
-- Any number of concurrently active classroom sessions, each with a unique six-character code, cloned quiz, independent timer, scores, and leaderboard.
-- Server-authoritative answer validation; one accepted answer per student per question.
-- On student disconnect the server keeps their score in the room leaderboard but marks them offline. They must enter the room code and same name again to return. While offline, quiz is hidden and buttons disabled. Names are an intentionally simple identity mechanism, not secure student authentication.
-- Real-time enrolled/online counters and leaderboard broadcasts; PDF results for each room.
+## Render setup
 
-## Hosting and limitations
-- **Persistent storage:** `data/store.json` is a local file. Configure a persistent volume and set `QUIZ_DATA_FILE` if your host has ephemeral storage. Never commit it to Git.
-- **Single Node.js process:** active rooms and login tokens are in memory. Restarting loses live rooms, but saved quizzes/accounts remain. Multi-instance deployment requires shared DB and Socket.IO adapter plus distributed session state.
-- **Connectivity caveat:** browsers cannot always detect a network loss immediately. The server will reject stale/disconnected answers; the UI locks when Socket.IO reports disconnect or the browser reports offline. This does not prevent a student from keeping previously displayed quiz text using screenshots or developer tools.
-- **Name reclaim:** disconnected students can rejoin with the same name and room code to recover scores. For assessments requiring verified student identity, add authenticated student identities or recovery secrets.
-- **Security:** Run behind HTTPS; use a persistent secured directory for account data and consider rate-limiting authentication for public deployments. Teacher tokens expire on server restart or logout. A hardened production service should use database sessions, request throttling and CSRF-safe APIs.
-- **Scale:** optimized for one process and modest classroom workloads, not thousands of concurrent devices. Timer and leaderboard are server-authoritative; broadcasting 4 times/second may be adjusted for larger classrooms.
+1. Create a **Render Postgres** database (or use `render.yaml` via Render Blueprint; check actual pricing and free-tier availability in your Render dashboard).
+2. Create a Node web service pointing at this repository. Build command: `npm install`. Start command: `npm start`.
+3. Set `DATABASE_URL` to your database's **internal PostgreSQL URL** using the environment-variable settings. **Never commit the connection string**.
+4. If your provider requires TLS for the supplied URL, set `DATABASE_SSL=true`. Render internal database connections commonly do not require TLS.
+5. Deploy. On startup, tables and the index are created automatically. Open your deployed site, register a teacher, create and save a quiz, then create a room. Students must register/login before joining.
 
-## Per-question student feedback and offline status
+## Local development
 
-At each question reveal or timeout, students who submitted an answer see **Correct answer! +1 point** or **Wrong answer** with the correct choice. Students who did not answer see **no answer submitted**. Answer correctness is not displayed before reveal, and the teacher's projected screen keeps answers hidden. The leaderboard includes all enrolled students with explicit **Online** and **Offline** labels; offline students retain their previous score and can only rejoin by entering their room code and name again. All previously supported multi-teacher and saved-quiz features remain.
+Install Node.js 20+, run `npm install`, then set `DATABASE_URL` to a PostgreSQL connection string, and run `npm start`. The server exits with an error if PostgreSQL is not configured or unavailable.
 
-## Teacher participant removal (v2.2)
+## Operational notes
 
-When a teacher views one of their rooms, each participant has a **Remove** button (including offline participants). The teacher confirms removal. This immediately removes the participant and their score from the room, updates live enrollment counters and leaderboards, and sends an ejection message to an online participant. The server prevents the removed name from rejoining that specific room even after reconnecting. Other rooms, teachers, saved quizzes, and participants are unaffected. Names are not verified identities, so a removed student could choose a different name; use authenticated student identities if stronger exclusion is required.
+- PostgreSQL persists **users, saved quizzes, and answered questions** across app restarts. Existing `data/store.json` is **not automatically migrated**; old teacher accounts and quizzes need manual import. Old password hashes use the same scrypt format but a migration tool is not included.
+- Active quiz rooms, timers, participation and scores still live **in application memory**. Deploy **one server instance only**, and do not expect active rooms to survive restarts, deploys, or free-service sleep. Historical submitted answers remain in PostgreSQL. A shared session database / Redis adapter is recommended for scaling.
+- Student answer history shows up to the latest 500 submitted answers. Scores in the leaderboard are live memory values, separate from the historical results.
+- Students must log in and explicitly re-enter their join code after each disconnection. Teacher removal blocks their **account** from rejoining that room (not just the display name).
+- Passwords are salted and hashed with Node's scrypt; auth tokens are kept in application memory and browser sessionStorage, so users must log in again after a server restart.
+- Student answer history is accessible to the student and only correct answers from completed/revealed questions are shown. Questions answered but not yet revealed are marked pending.
+- If the app has a public deployment, use HTTPS and implement stronger measures (rate limiting, durable server sessions, CSRF protections where applicable, audit logging, data retention policies, student privacy notice) before broad production use.
+- If previously registered users used the JSON-storage edition, those accounts will not automatically appear in PostgreSQL.
+
+## Smoke testing
+
+Test with Teacher A, Teacher B, Student A and Student B using separate browsers/devices; verify room isolation, teacher login, saving quizzes, student history persistence after server restart, correct/wrong feedback after reveal, offline labels, re-entry after reconnection, and participant removal.

@@ -4,29 +4,35 @@ const http = require('http');
 const { Server } = require('socket.io');
 const PDFDocument = require('pdfkit');
 const { randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
-const fs = require('fs');
+const { Pool } = require('pg');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1000000, pingInterval: 10000, pingTimeout: 10000 });
 const PORT = process.env.PORT || 3000;
-const DATA_FILE = process.env.QUIZ_DATA_FILE || path.join(__dirname, 'data', 'store.json');
-app.use(express.static(path.join(__dirname, 'public')));
-
-function loadStore() {
-  try {
-    const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    if (Array.isArray(data.teachers) && Array.isArray(data.quizzes)) return data;
-  } catch (err) { if (err.code !== 'ENOENT') console.error('Cannot read store:', err); }
-  return { teachers: [], quizzes: [] };
-}
-const store = loadStore();
-function persist() {
-  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, DATA_FILE);
+if (!process.env.DATABASE_URL) { console.error('DATABASE_URL is required (Render PostgreSQL connection string).'); process.exit(1); }
+const db = new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_SSL === 'true' ? {rejectUnauthorized:false} : undefined});
+app.use(express.static(path.join(__dirname,'public')));
+async function initDb(){
+  await db.query(`CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('teacher','student')),
+    username TEXT NOT NULL, salt TEXT NOT NULL, hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(role,username)
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS quizzes (
+    id UUID PRIMARY KEY, teacher_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL, questions JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS answer_history (
+    id BIGSERIAL PRIMARY KEY, student_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    room_code TEXT NOT NULL, quiz_title TEXT NOT NULL, question_index INTEGER NOT NULL,
+    question_text TEXT NOT NULL, choices JSONB NOT NULL, selected_index INTEGER NOT NULL,
+    correct_index INTEGER NOT NULL, awarded_points INTEGER NOT NULL,
+    answered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(student_id,room_code,question_index)
+  )`);
+  await db.query('CREATE INDEX IF NOT EXISTS answer_history_student_idx ON answer_history(student_id,answered_at DESC)');
 }
 function hashPassword(password, salt = randomBytes(16).toString('hex')) {
   return { salt, hash: scryptSync(password, salt, 64).toString('hex') };
@@ -51,8 +57,10 @@ function cleanQuestions(input) {
 }
 const sessions = new Map(); // roomCode -> active session
 const teacherTokens = new Map(); // token -> teacherId; memory-only, invalidated by restart
+const studentTokens = new Map(); // token -> studentId
 const teacherSockets = new Map(); // socket id -> teacher id
 const playerSockets = new Map(); // socket id -> {code, playerId}
+const studentSockets = new Map(); // socket id -> student id
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function newCode() {
   for (let tries = 0; tries < 1000; tries++) {
@@ -89,6 +97,7 @@ function publish(room) {
   for (const id of room.teacherSocketIds) io.to(id).emit('update',view(room,true));
   for (const p of room.players.values()) if (p.connected && p.socketId) {
     io.to(p.socketId).emit('update',view(room,false));
+    if(room.reveal || room.finished) {const ps=io.sockets.sockets.get(p.socketId);if(ps)sendHistory(ps).catch(console.error);}
     io.to(p.socketId).emit('answer-status',{question:room.currentQuestion,answered:p.answeredQuestion===room.currentQuestion,selectedIndex:p.answeredQuestion===room.currentQuestion?p.selectedAnswer:null});
   }
 }
@@ -140,79 +149,120 @@ function detachTeacher(socket) {
   teacherSockets.delete(socket.id);
   if (id) for (const room of sessions.values()) if(room.teacherId===id) room.teacherSocketIds.delete(socket.id);
 }
-function auth(socket,token) {
+async function auth(socket,token) {
   const teacherId=teacherTokens.get(String(token || ''));
   if (!teacherId) throw Error('Login expired. Please sign in again.');
   detachStudent(socket);detachTeacher(socket);
   teacherSockets.set(socket.id,teacherId);
   for (const room of sessions.values()) if (room.teacherId===teacherId) room.teacherSocketIds.add(socket.id);
   socket.emit('teacher:granted',{teacherId});
-  sendDashboard(socket);
+  await sendDashboard(socket);
   for (const room of sessions.values()) if(room.teacherId===teacherId) socket.emit('update',view(room,true));
 }
-function sendDashboard(socket) {
+async function sendDashboard(socket) {
   const id=teacherOf(socket);
   if (!id) return;
+  const {rows:quizzes}=await db.query('SELECT id,title,questions FROM quizzes WHERE teacher_id=$1 ORDER BY updated_at DESC',[id]);
   socket.emit('teacher:dashboard',{
-    quizzes:store.quizzes.filter(q=>q.teacherId===id).map(q=>({id:q.id,title:q.title,questions:q.questions})),
+    quizzes,
     rooms:[...sessions.values()].filter(r=>r.teacherId===id).map(r=>({code:r.code,title:r.title,started:r.started,finished:r.finished,participants:r.players.size}))
   });
 }
 
+async function sendHistory(socket) {
+  const id=studentSockets.get(socket.id);if(!id)throw Error('Student login required.');
+  const {rows}=await db.query('SELECT room_code,quiz_title,question_index,question_text,choices,selected_index,correct_index,awarded_points,answered_at FROM answer_history WHERE student_id=$1 ORDER BY answered_at DESC LIMIT 500',[id]);
+  const safe=rows.map(r=>{
+    const room=sessions.get(r.room_code);
+    const revealed=!room || room.finished || (room.currentQuestion>r.question_index) || (room.currentQuestion===r.question_index && room.reveal);
+    return {...r, correct_index: revealed?r.correct_index:null,awarded_points:revealed?r.awarded_points:null,review_available:revealed};
+  });
+  socket.emit('student:history',safe);
+}
 io.on('connection',socket=>{
-  socket.on('teacher:register',data=>{
+  socket.on('teacher:register',async data=>{
     try {
       const username=String(data?.username||'').trim().toLowerCase();
       const password=String(data?.password||'');
       if(!/^[a-z0-9_.-]{3,40}$/.test(username)||password.length<8||password.length>128) throw Error('Username: 3–40 letters/numbers/._-; password: 8–128 characters.');
-      if(store.teachers.some(t=>t.username===username)) throw Error('Username already exists.');
-      const teacher={id:randomUUID(),username,...hashPassword(password)};
-      store.teachers.push(teacher); persist();
-      socket.emit('teacher:auth-message','Account created. Please log in.');
-    } catch(e){emitError(socket,e);}
+      const hashed=hashPassword(password);
+      await db.query('INSERT INTO users(id,role,username,salt,hash) VALUES($1,$2,$3,$4,$5)',[randomUUID(),'teacher',username,hashed.salt,hashed.hash]);
+      socket.emit('teacher:auth-message','Teacher account created. Please log in.');
+    }catch(e){emitError(socket,e.code==='23505'?Error('Teacher username already exists.'):e);}
   });
-  socket.on('teacher:login',data=>{
+  socket.on('teacher:login',async data=>{
     try {
       const username=String(data?.username||'').trim().toLowerCase();
       const password=String(data?.password||'');
-      const teacher=store.teachers.find(t=>t.username===username);
-      if(!teacher||!verifyPassword(password,teacher)) throw Error('Incorrect username or password.');
-      const token=randomBytes(32).toString('hex'); teacherTokens.set(token,teacher.id);
-      socket.emit('teacher:token',token);auth(socket,token);
+      const {rows}=await db.query('SELECT * FROM users WHERE role=$1 AND username=$2',['teacher',username]);
+      const user=rows[0];
+      if(!user||!verifyPassword(password,user))throw Error('Incorrect username or password.');
+      const token=randomBytes(32).toString('hex');teacherTokens.set(token,user.id);
+      socket.emit('teacher:token',token);await auth(socket,token);
     }catch(e){emitError(socket,e);}
   });
-  socket.on('teacher:resume',token=>{try{auth(socket,token);}catch(e){emitError(socket,e);}});
+  socket.on('teacher:resume',async token=>{try{await auth(socket,token);}catch(e){emitError(socket,e);}});
   socket.on('teacher:logout',token=>{teacherTokens.delete(String(token||''));detachTeacher(socket);socket.emit('teacher:logged-out');});
-  socket.on('teacher:save-quiz',data=>{
+  socket.on('teacher:save-quiz',async data=>{
     try{
       const teacherId=teacherOf(socket);if(!teacherId)throw Error('Sign in first.');
       const title=String(data?.title||'').trim().slice(0,100);
       if(!title)throw Error('Quiz title required.');
       const questions=cleanQuestions(data?.questions);
-      let quiz=data?.id ? store.quizzes.find(q=>q.id===data.id && q.teacherId===teacherId) : null;
-      if(data?.id && !quiz)throw Error('Saved quiz not found.');
-      if(quiz){quiz.title=title;quiz.questions=questions;} else store.quizzes.push({id:randomUUID(),teacherId,title,questions});
-      persist();sendDashboard(socket);socket.emit('teacher:auth-message','Quiz saved successfully.');
+      if(data?.id){
+        const result=await db.query('UPDATE quizzes SET title=$1,questions=$2,updated_at=NOW() WHERE id=$3 AND teacher_id=$4',[title,JSON.stringify(questions),data.id,teacherId]);
+        if(!result.rowCount)throw Error('Saved quiz not found.');
+      }else await db.query('INSERT INTO quizzes(id,teacher_id,title,questions) VALUES($1,$2,$3,$4)',[randomUUID(),teacherId,title,JSON.stringify(questions)]);
+      await sendDashboard(socket);socket.emit('teacher:auth-message','Quiz saved successfully.');
     }catch(e){emitError(socket,e);}
   });
-  socket.on('teacher:delete-quiz',id=>{
+  socket.on('teacher:delete-quiz',async id=>{
     try{
       const teacherId=teacherOf(socket);if(!teacherId)throw Error('Sign in first.');
-      const index=store.quizzes.findIndex(q=>q.id===id && q.teacherId===teacherId);
-      if(index<0)throw Error('Quiz not found.');store.quizzes.splice(index,1);persist();sendDashboard(socket);
+      const result=await db.query('DELETE FROM quizzes WHERE id=$1 AND teacher_id=$2',[id,teacherId]);
+      if(!result.rowCount)throw Error('Quiz not found.');await sendDashboard(socket);
     }catch(e){emitError(socket,e);}
   });
-  socket.on('teacher:create-room',quizId=>{
+  socket.on('student:register',async data=>{
+    try{
+      const username=String(data?.username||'').trim().toLowerCase();const password=String(data?.password||'');
+      if(!/^[a-z0-9_.-]{3,40}$/.test(username)||password.length<8||password.length>128)throw Error('Student username: 3–40 letters/numbers/._-; password: 8–128 characters.');
+      const pw=hashPassword(password);
+      await db.query('INSERT INTO users(id,role,username,salt,hash) VALUES($1,$2,$3,$4,$5)',[randomUUID(),'student',username,pw.salt,pw.hash]);
+      socket.emit('student:message','Student account created. Please log in.');
+    }catch(e){emitError(socket,e.code==='23505'?Error('Student username already exists.'):e);}
+  });
+  socket.on('student:login',async data=>{
+    try{
+      const username=String(data?.username||'').trim().toLowerCase();const password=String(data?.password||'');
+      const {rows}=await db.query('SELECT * FROM users WHERE role=$1 AND username=$2',['student',username]);const user=rows[0];
+      if(!user||!verifyPassword(password,user))throw Error('Incorrect student username or password.');
+      detachStudent(socket);detachTeacher(socket);studentSockets.set(socket.id,user.id);
+      const token=randomBytes(32).toString('hex');studentTokens.set(token,user.id);
+      socket.emit('student:token',token);socket.emit('student:granted',{username:user.username});await sendHistory(socket);
+    }catch(e){emitError(socket,e);}
+  });
+  socket.on('student:resume',async token=>{
+    try{
+      const id=studentTokens.get(String(token||''));if(!id)throw Error('Student session expired. Please log in again.');
+      detachStudent(socket);studentSockets.set(socket.id,id);
+      socket.emit('student:granted',{});await sendHistory(socket);
+    }catch(e){emitError(socket,e);}
+  });
+  socket.on('student:history',async ()=>{try{await sendHistory(socket);}catch(e){emitError(socket,e);}});
+  socket.on('student:logout',token=>{studentTokens.delete(String(token||''));detachStudent(socket);studentSockets.delete(socket.id);socket.emit('student:logged-out');});
+  socket.on('teacher:create-room',async quizId=>{
     try{
       const teacherId=teacherOf(socket);if(!teacherId)throw Error('Sign in first.');
-      const quiz=store.quizzes.find(q=>q.id===quizId && q.teacherId===teacherId);
+      const {rows}=await db.query('SELECT id,title,questions FROM quizzes WHERE id=$1 AND teacher_id=$2',[quizId,teacherId]);
+      const quiz=rows[0];
       if(!quiz)throw Error('Save or select a quiz first.');
       const code=newCode();
       const room={code,teacherId,title:quiz.title,questions:structuredClone(quiz.questions),
         players:new Map(),removedNames:new Set(),teacherSocketIds:new Set(),currentQuestion:-1,started:false,finished:false,
         reveal:false,transitioning:false,paused:false,timeLeft:0,deadline:0,interval:null,transitionTimeout:null};
       for(const [id,tid] of teacherSockets) if(tid===teacherId)room.teacherSocketIds.add(id);
-      sessions.set(code,room);sendDashboard(socket);socket.emit('teacher:room-created',{code});publish(room);
+      sessions.set(code,room);await sendDashboard(socket);socket.emit('teacher:room-created',{code});publish(room);
     }catch(e){emitError(socket,e);}
   });
   socket.on('teacher:close-room',code=>{
@@ -268,22 +318,24 @@ io.on('connection',socket=>{
     try{
       // Every new socket must explicitly enter code; no automatic student resume.
       const code=String(data?.code||'').trim().toUpperCase();
+      const studentId=studentSockets.get(socket.id);if(!studentId)throw Error('Log in to your student account first.');
       const name=String(data?.name||'').trim().slice(0,30);
       if(!name)throw Error('Name required.');
       const room=sessions.get(code);if(!room)throw Error('Invalid or expired room code.');
       if(teacherOf(socket))throw Error('Teacher account cannot join as a student on this connection.');
       detachStudent(socket);
-      const key=name.toLowerCase();
+      const key=studentId;
       if(room.removedNames.has(key))throw Error('You have been removed from this room. Ask your teacher for assistance.');
       let player=room.players.get(key);
-      if(player?.connected)throw Error('This name is already connected. Use a different name.');
+      if(player?.connected)throw Error('This student account is already connected to the room.');
+      if([...room.players.values()].some(p=>p.name.toLowerCase()===name.toLowerCase() && p.id!==key))throw Error('Display name in use. Choose another.');
       if(!player){player={id:key,name,score:0,answeredQuestion:-1,selectedAnswer:null,connected:false,socketId:null};room.players.set(key,player);}
       player.connected=true;player.socketId=socket.id;
       playerSockets.set(socket.id,{code,playerId:key});socket.join(`room:${code}`);
       socket.emit('joined',{code,name});publish(room);
     }catch(e){emitError(socket,e);}
   });
-  socket.on('answer',index=>{
+  socket.on('answer',async index=>{
     const info=playerSockets.get(socket.id);if(!info)return;
     const room=sessions.get(info.code);if(!room||!room.started||room.finished||room.reveal||room.transitioning||room.paused||room.timeLeft<=0)return;
     const player=room.players.get(info.playerId);
@@ -293,8 +345,14 @@ io.on('connection',socket=>{
     player.answeredQuestion=room.currentQuestion;
     player.selectedAnswer=index;
     if(index===question.correct)player.score++;
+    try {
+      await db.query(`INSERT INTO answer_history(student_id,room_code,quiz_title,question_index,question_text,choices,selected_index,correct_index,awarded_points)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(student_id,room_code,question_index) DO NOTHING`,
+        [player.id,room.code,room.title,room.currentQuestion,question.text,JSON.stringify(question.choices),index,question.correct,index===question.correct?1:0]);
+      await sendHistory(socket);
+    }catch(e){console.error('Answer history save failed:',e);socket.emit('error-message','Answer recorded live, but saving history failed.');}
     socket.emit('answer:accepted',{question:room.currentQuestion});publish(room);
   });
-  socket.on('disconnect',()=>{detachStudent(socket);detachTeacher(socket);});
+  socket.on('disconnect',()=>{detachStudent(socket);detachTeacher(socket);studentSockets.delete(socket.id);});
 });
-server.listen(PORT,'0.0.0.0',()=>console.log(`Quiz Flash listening on port ${PORT}`));
+initDb().then(()=>server.listen(PORT,'0.0.0.0',()=>console.log(`Quiz Flash listening on port ${PORT}`))).catch(e=>{console.error('Database initialization failed:',e);process.exit(1);});
