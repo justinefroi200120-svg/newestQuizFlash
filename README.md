@@ -21,3 +21,7 @@ Requires Node.js 18+. Run `npm install` and `npm start`, then open http://localh
 ## Per-question student feedback and offline status
 
 At each question reveal or timeout, students who submitted an answer see **Correct answer! +1 point** or **Wrong answer** with the correct choice. Students who did not answer see **no answer submitted**. Answer correctness is not displayed before reveal, and the teacher's projected screen keeps answers hidden. The leaderboard includes all enrolled students with explicit **Online** and **Offline** labels; offline students retain their previous score and can only rejoin by entering their room code and name again. All previously supported multi-teacher and saved-quiz features remain.
+
+## Teacher participant removal (v2.2)
+
+When a teacher views one of their rooms, each participant has a **Remove** button (including offline participants). The teacher confirms removal. This immediately removes the participant and their score from the room, updates live enrollment counters and leaderboards, and sends an ejection message to an online participant. The server prevents the removed name from rejoining that specific room even after reconnecting. Other rooms, teachers, saved quizzes, and participants are unaffected. Names are not verified identities, so a removed student could choose a different name; use authenticated student identities if stronger exclusion is required.

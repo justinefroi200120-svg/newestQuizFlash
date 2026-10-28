@@ -33,12 +33,26 @@ function updateDashboard(data){quizzes=data.quizzes;rooms=data.rooms;const selec
 function renderRooms(){const root=$('rooms');root.replaceChildren();if(!rooms.length)root.append(el('p','No live rooms yet.','muted'));for(const r of rooms){const wrap=el('article',undefined,'room');wrap.append(el('h3',`${r.title} — ${r.code}`),el('p',`${r.participants} enrolled • ${r.finished?'Finished':r.started?'In progress':'Waiting'}`,'muted'));const actions=el('div',undefined,'row');actions.append(button('View',()=>{activeTeacherRoom=r.code;renderRooms();renderTeacherRoom();}),button('Start',()=>command(r.code,'start')),button('Pause / Resume',()=>command(r.code,'pause'),'secondary'),button('Reveal',()=>command(r.code,'reveal'),'secondary'),button('Next',()=>command(r.code,'next')),button('Reset',()=>command(r.code,'reset'),'secondary'),button('Download PDF',()=>command(r.code,'pdf'),'secondary'),button('Close Room',()=>{if(confirm('Close room '+r.code+'?'))socket.emit('teacher:close-room',r.code);},'danger'));wrap.append(actions);if(r.code===activeTeacherRoom)wrap.classList.add('active');root.append(wrap);}}
 function command(code,action){socket.emit('teacher:command',{code,action});}
 function renderTeacherRoom(){const s=snapshots.get(activeTeacherRoom);$('quizPanel').hidden=!s;if(s)render(s,true);}
-function renderLeaderboard(items){const root=$('leaderboard');root.replaceChildren();if(!items.length){root.append(el('p','No students yet.','muted'));return;}items.forEach((p,i)=>root.append(el('div',`#${i+1} ${p.name} — ${p.score} point${p.score===1?'':'s'}${p.connected?' 🟢 Online':' 🔴 Offline'}`,'rank'+(!p.connected?' offline':''))));}
+function renderLeaderboard(items,isTeacher,code){
+ const root=$('leaderboard');root.replaceChildren();
+ if(!items.length){root.append(el('p','No students yet.','muted'));return;}
+ items.forEach((p,i)=>{
+   const row=el('div',undefined,'rank participant-row'+(!p.connected?' offline':''));
+   row.append(el('span',`#${i+1} ${p.name} — ${p.score} point${p.score===1?'':'s'}${p.connected?' 🟢 Online':' 🔴 Offline'}`));
+   if(isTeacher&&p.id){
+     row.append(button('Remove',()=>{
+       if(confirm(`Remove ${p.name} from room ${code}? Their score will be removed and they cannot rejoin using the same name.`))
+         socket.emit('teacher:remove-participant',{code,playerId:p.id});
+     },'danger remove-participant'));
+   }
+   root.append(row);
+ });
+}
 function render(s,isTeacher){if(isTeacher&&s.code!==activeTeacherRoom)return;if(!isTeacher&&(!joined||s.code!==roomCode))return;
  $('quizPanel').hidden=false;$('quizTitleLive').textContent=s.title+' — '+s.code;
  $('participants').textContent=`${s.participantCount} participants`;$('counter').textContent=`${s.connectedCount} connected • ${s.participantCount-s.connectedCount} disconnected`;
  $('timer').textContent=s.timeLeft+'s'+(s.paused?' (PAUSED)':'');
- renderLeaderboard(s.leaderboard);
+ renderLeaderboard(s.leaderboard,isTeacher,s.code);
  if(!s.question){$('questionTitle').textContent=s.finished?'Quiz complete!':'Waiting for teacher…';$('choices').replaceChildren();return;}
  $('questionTitle').textContent=`Question ${s.currentQuestion+1} of ${s.totalQuestions}: ${s.question.text}`;
  if(questionIndex!==s.currentQuestion || lastQuestionSignature!==s.code){questionIndex=s.currentQuestion;lastQuestionSignature=s.code;answered=false;selectedAnswer=null;$('result').textContent='';}
@@ -68,6 +82,7 @@ socket.on('teacher:room-created',data=>{activeTeacherRoom=data.code;renderRooms(
 socket.on('teacher:room-closed',code=>{snapshots.delete(code);if(activeTeacherRoom===code){activeTeacherRoom='';$('quizPanel').hidden=true;}notice('Room '+code+' closed.');});
 socket.on('joined',data=>{joined=true;roomCode=data.code;questionIndex=-1;answered=false;$('studentPanel').hidden=true;$('studentStatus').textContent='Joined as '+data.name;notice('Joined room '+data.code);});
 socket.on('session-closed',()=>{clearStudent();notice('Teacher closed the room.');});
+socket.on('participant-removed',()=>{clearStudent();$('joinCode').value='';lastStudentSnapshot=null;notice('Your teacher removed you from this quiz room. Contact your teacher if this was a mistake.');});
 let lastStudentSnapshot=null;
 socket.on('update',s=>{if(!teacher && joined && s.code===roomCode)lastStudentSnapshot=s;if(teacher){snapshots.set(s.code,s);if(!activeTeacherRoom)activeTeacherRoom=s.code;renderTeacherRoom();}else render(s,false);});
 socket.on('answer-status',data=>{if(!joined||data.question!==questionIndex)return;if(data.answered){answered=true;selectedAnswer=data.selectedIndex;document.querySelectorAll('.choice').forEach(b=>b.disabled=true);if(lastStudentSnapshot?.reveal)render(lastStudentSnapshot,false);}});

@@ -68,8 +68,8 @@ function ownedSession(socket, code) {
   if (!room || room.teacherId !== teacherOf(socket)) throw Error('Room not found or access denied.');
   return room;
 }
-function publicLeaderboard(room) {
-  return [...room.players.values()].sort((a,b) => b.score-a.score || a.name.localeCompare(b.name)).map(p => ({name:p.name,score:p.score,connected:p.connected}));
+function publicLeaderboard(room, teacher = false) {
+  return [...room.players.values()].sort((a,b) => b.score-a.score || a.name.localeCompare(b.name)).map(p => ({...(teacher ? {id:p.id} : {}),name:p.name,score:p.score,connected:p.connected}));
 }
 function view(room, teacher = false) {
   const q = room.questions[room.currentQuestion];
@@ -81,7 +81,7 @@ function view(room, teacher = false) {
     timeLeft:room.timeLeft, paused:room.paused, transitioning:room.transitioning,
     participantCount:room.players.size,
     connectedCount:[...room.players.values()].filter(p => p.connected).length,
-    leaderboard:publicLeaderboard(room)
+    leaderboard:publicLeaderboard(room, teacher)
   };
 }
 function publish(room) {
@@ -209,7 +209,7 @@ io.on('connection',socket=>{
       if(!quiz)throw Error('Save or select a quiz first.');
       const code=newCode();
       const room={code,teacherId,title:quiz.title,questions:structuredClone(quiz.questions),
-        players:new Map(),teacherSocketIds:new Set(),currentQuestion:-1,started:false,finished:false,
+        players:new Map(),removedNames:new Set(),teacherSocketIds:new Set(),currentQuestion:-1,started:false,finished:false,
         reveal:false,transitioning:false,paused:false,timeLeft:0,deadline:0,interval:null,transitionTimeout:null};
       for(const [id,tid] of teacherSockets) if(tid===teacherId)room.teacherSocketIds.add(id);
       sessions.set(code,room);sendDashboard(socket);socket.emit('teacher:room-created',{code});publish(room);
@@ -220,6 +220,30 @@ io.on('connection',socket=>{
       const room=ownedSession(socket,code);stopTimers(room);
       for(const p of room.players.values()) if(p.socketId){io.to(p.socketId).emit('session-closed');playerSockets.delete(p.socketId);}
       sessions.delete(room.code);sendDashboard(socket);socket.emit('teacher:room-closed',room.code);
+    }catch(e){emitError(socket,e);}
+  });
+  socket.on('teacher:remove-participant',data=>{
+    try {
+      const room=ownedSession(socket,data?.code);
+      const playerId=String(data?.playerId||'');
+      const player=room.players.get(playerId);
+      if(!player)throw Error('Participant not found in this room.');
+      // A removed student cannot reclaim the same name in this room.
+      room.removedNames.add(player.id);
+      room.players.delete(player.id);
+      if(player.socketId){
+        playerSockets.delete(player.socketId);
+        io.to(player.socketId).emit('participant-removed',{code:room.code});
+        const studentSocket=io.sockets.sockets.get(player.socketId);
+        if(studentSocket)studentSocket.leave(`room:${room.code}`);
+      }
+      publish(room);
+      // Refresh every signed-in teacher tab, not only the one that removed the student.
+      for(const teacherSocketId of room.teacherSocketIds){
+        const teacherSocket=io.sockets.sockets.get(teacherSocketId);
+        if(teacherSocket)sendDashboard(teacherSocket);
+      }
+      socket.emit('teacher:auth-message',`${player.name} removed from room ${room.code}.`);
     }catch(e){emitError(socket,e);}
   });
   socket.on('teacher:command',data=>{
@@ -250,6 +274,7 @@ io.on('connection',socket=>{
       if(teacherOf(socket))throw Error('Teacher account cannot join as a student on this connection.');
       detachStudent(socket);
       const key=name.toLowerCase();
+      if(room.removedNames.has(key))throw Error('You have been removed from this room. Ask your teacher for assistance.');
       let player=room.players.get(key);
       if(player?.connected)throw Error('This name is already connected. Use a different name.');
       if(!player){player={id:key,name,score:0,answeredQuestion:-1,selectedAnswer:null,connected:false,socketId:null};room.players.set(key,player);}
